@@ -31,10 +31,13 @@ class ApiBehaviorTests(unittest.TestCase):
     def setUp(self):
         with self.TestSession() as s:
             self.manager=User(name="Manager",email="manager@test.local",password_hash=password_hash.hash("Manager123!"),global_role=Role.PROJECT_MANAGER)
+            self.other_manager=User(name="Other Manager",email="other-manager@test.local",password_hash=password_hash.hash("OtherManager123!"),global_role=Role.PROJECT_MANAGER)
             self.member=User(name="Member",email="member@test.local",password_hash=password_hash.hash("Member123!"),global_role=Role.TEAM_MEMBER)
             self.viewer=User(name="Viewer",email="viewer@test.local",password_hash=password_hash.hash("Viewer123!"),global_role=Role.VIEWER)
-            s.add_all([self.manager,self.member,self.viewer]); s.flush()
+            s.add_all([self.manager,self.other_manager,self.member,self.viewer]); s.flush()
             self.project=Project(name="Test project",description="",created_by=self.manager.id,project_manager_id=self.manager.id); s.add(self.project); s.flush()
+            other_project=Project(name="Private project",description="",created_by=self.other_manager.id,project_manager_id=self.other_manager.id); s.add(other_project); s.flush()
+            self.other_project_id=other_project.id
             s.add_all([Membership(project_id=self.project.id,user_id=self.manager.id,project_role=ProjectRole.MANAGER),Membership(project_id=self.project.id,user_id=self.member.id,project_role=ProjectRole.MEMBER),Membership(project_id=self.project.id,user_id=self.viewer.id,project_role=ProjectRole.VIEWER)])
             self.task=Task(project_id=self.project.id,title="Concurrent task",description="",status=TaskStatus.TODO,created_by=self.manager.id,assignee_id=self.member.id); s.add(self.task); s.commit()
             self.task_id=self.task.id
@@ -58,6 +61,19 @@ class ApiBehaviorTests(unittest.TestCase):
         headers=self.headers("viewer@test.local","Viewer123!")
         r=self.client.patch(f"/api/tasks/{self.task_id}",headers=headers,json={"version":1,"status":"DONE"})
         self.assertEqual(r.status_code,403)
+
+    def test_manager_cannot_access_an_unrelated_project_by_id(self):
+        headers=self.headers("manager@test.local","Manager123!")
+        r=self.client.get(f"/api/projects/{self.other_project_id}",headers=headers)
+        self.assertEqual(r.status_code,403)
+
+    def test_team_member_can_change_assigned_status_but_not_task_details(self):
+        headers=self.headers("member@test.local","Member123!")
+        url=f"/api/tasks/{self.task_id}"
+        status_update=self.client.patch(url,headers=headers,json={"version":1,"status":"DONE"})
+        self.assertEqual(status_update.status_code,200,status_update.text)
+        detail_update=self.client.patch(url,headers=headers,json={"version":2,"title":"Unauthorized rename"})
+        self.assertEqual(detail_update.status_code,403)
 
     def test_stale_task_version_returns_latest_task_with_conflict(self):
         headers=self.headers("manager@test.local","Manager123!")
