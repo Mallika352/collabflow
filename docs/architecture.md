@@ -14,6 +14,10 @@ The Next.js App Router renders the workspace UI. Its client dashboard calls Fast
 
 Foreign keys protect references; project/task/comment indexes support scoped lists and lookups. SQLAlchemy creates the schema from these models using `backend/scripts/init_db.py`.
 
+## Project visibility policy
+
+The API and Projects page use membership-scoped visibility. Admins can list all non-archived projects. Project Managers see projects assigned to them or where they have any project membership. Team Members and Viewers see only projects with an explicit membership. Project details and project data routes apply the same access rule; an unassigned user cannot open a hidden project by guessing its ID. Admins creating a project select an active Project Manager (or Admin), then add other existing users through the project member controls. Adding a member makes that project visible to them. Removing a member is blocked while they have assigned tasks; the assigned Project Manager must be reassigned first.
+
 ## Authentication and authorization
 
 Login verifies Argon2 hashes and issues a signed, expiring JWT. Protected routes validate the signature and expiry, load the user from the database, and reject inactive accounts. `/api/auth/me` supplies the current identity. The demo client stores the bearer token in local storage and clears it on logout or invalid sessions; this is a local demonstration trade-off, not a recommended public deployment session design.

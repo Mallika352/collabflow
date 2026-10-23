@@ -99,8 +99,8 @@ def task_access(s,tid,u,write=False):
     if write and not manager and not (u.global_role==Role.TEAM_MEMBER and t.assignee_id==u.id): raise HTTPException(403,"Task update not permitted")
     return t,p,m,manager
 def valid_assignee(s,pid,uid):
-    if uid is not None and not s.scalar(select(Membership.id).where(Membership.project_id==pid,Membership.user_id==uid)):
-        raise HTTPException(400,"Assignee must be a member of this project")
+    if uid is not None and not s.scalar(select(Membership.id).join(User,User.id==Membership.user_id).where(Membership.project_id==pid,Membership.user_id==uid,Membership.project_role!=ProjectRole.VIEWER,User.global_role!=Role.VIEWER,User.is_active.is_(True))):
+        raise HTTPException(400,"Assignee must be an active non-viewer member of this project")
 
 @app.get("/")
 def root(): return {"message":"CollabFlow API","docs":"/docs"}
@@ -147,7 +147,10 @@ def deactivate(uid:int,s:Session=Depends(db),u:User=Depends(current_user)):
 @app.get("/api/projects")
 def projects(s:Session=Depends(db),u:User=Depends(current_user)):
     q=select(Project).where(Project.archived_at.is_(None))
-    if u.global_role!=Role.ADMIN: q=q.where(Project.id.in_(select(Membership.project_id).where(Membership.user_id==u.id)) | (Project.project_manager_id==u.id))
+    if u.global_role!=Role.ADMIN:
+        visible=Project.id.in_(select(Membership.project_id).where(Membership.user_id==u.id))
+        if u.global_role==Role.PROJECT_MANAGER: visible=visible | (Project.project_manager_id==u.id)
+        q=q.where(visible)
     return [project_data(p,s) for p in s.scalars(q.order_by(Project.updated_at.desc()))]
 @app.post("/api/projects",status_code=201)
 def create_project(data:ProjectCreate,s:Session=Depends(db),u:User=Depends(current_user)):
@@ -189,16 +192,24 @@ def team(pid:int,s:Session=Depends(db),u:User=Depends(current_user)):
     project_access(s,pid,u)
     rows=s.execute(select(User,Membership).join(Membership,Membership.user_id==User.id).where(Membership.project_id==pid)).all()
     return [{**user_data(person),"project_role":membership.project_role.value,"joined_at":membership.joined_at} for person,membership in rows]
+@app.get("/api/projects/{pid}/available-members")
+def available_members(pid:int,s:Session=Depends(db),u:User=Depends(current_user)):
+    project_access(s,pid,u,True)
+    existing=select(Membership.user_id).where(Membership.project_id==pid)
+    return [user_data(person) for person in s.scalars(select(User).where(User.is_active.is_(True),~User.id.in_(existing)).order_by(User.name))]
 @app.post("/api/projects/{pid}/team",status_code=201)
 def add_member(pid:int,data:MemberInput,s:Session=Depends(db),u:User=Depends(current_user)):
     project_access(s,pid,u,True); x=s.get(User,data.user_id)
     if not x or not x.is_active: raise HTTPException(404,"Active user not found")
+    if data.project_role==ProjectRole.MANAGER and x.global_role not in (Role.ADMIN,Role.PROJECT_MANAGER): raise HTTPException(400,"Only Admins and Project Managers can have the project Manager role")
     if s.scalar(select(Membership.id).where(Membership.project_id==pid,Membership.user_id==x.id)): raise HTTPException(409,"User already belongs to this project")
     m=Membership(project_id=pid,user_id=x.id,project_role=data.project_role); s.add(m); s.commit(); return {**user_data(x),"project_role":m.project_role.value}
 @app.patch("/api/projects/{pid}/team/{uid}")
 def change_member(pid:int,uid:int,data:MemberPatch,s:Session=Depends(db),u:User=Depends(current_user)):
     project_access(s,pid,u,True); m=s.scalar(select(Membership).where(Membership.project_id==pid,Membership.user_id==uid))
     if not m: raise HTTPException(404,"Membership not found")
+    x=s.get(User,uid)
+    if data.project_role==ProjectRole.MANAGER and x.global_role not in (Role.ADMIN,Role.PROJECT_MANAGER): raise HTTPException(400,"Only Admins and Project Managers can have the project Manager role")
     m.project_role=data.project_role; s.commit(); return {"user_id":uid,"project_role":m.project_role.value}
 @app.delete("/api/projects/{pid}/team/{uid}",status_code=204)
 def remove_member(pid:int,uid:int,s:Session=Depends(db),u:User=Depends(current_user)):
