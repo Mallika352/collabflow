@@ -69,8 +69,8 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 Use a second VS Code terminal at the repository root:
 
 ```powershell
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
 Open `http://localhost:3000`. The browser calls the API at `http://localhost:8000`. FastAPI CORS permits the configured `FRONTEND_ORIGIN` (default `http://localhost:3000`) and localhost loopback origin.
