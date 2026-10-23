@@ -1,0 +1,73 @@
+"""Run with: python -m unittest discover -s tests"""
+import sys
+import unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from app.main import Base, Membership, Project, ProjectRole, Role, Task, TaskStatus, User, app, db, password_hash
+
+class ApiBehaviorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.engine=create_engine("sqlite+pysqlite://",connect_args={"check_same_thread":False},poolclass=StaticPool)
+        Base.metadata.create_all(cls.engine)
+        cls.TestSession=sessionmaker(bind=cls.engine,expire_on_commit=False)
+        def override_db():
+            session=cls.TestSession()
+            try: yield session
+            finally: session.close()
+        app.dependency_overrides[db]=override_db
+
+    @classmethod
+    def tearDownClass(cls):
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        with self.TestSession() as s:
+            self.manager=User(name="Manager",email="manager@test.local",password_hash=password_hash.hash("Manager123!"),global_role=Role.PROJECT_MANAGER)
+            self.member=User(name="Member",email="member@test.local",password_hash=password_hash.hash("Member123!"),global_role=Role.TEAM_MEMBER)
+            self.viewer=User(name="Viewer",email="viewer@test.local",password_hash=password_hash.hash("Viewer123!"),global_role=Role.VIEWER)
+            s.add_all([self.manager,self.member,self.viewer]); s.flush()
+            self.project=Project(name="Test project",description="",created_by=self.manager.id,project_manager_id=self.manager.id); s.add(self.project); s.flush()
+            s.add_all([Membership(project_id=self.project.id,user_id=self.manager.id,project_role=ProjectRole.MANAGER),Membership(project_id=self.project.id,user_id=self.member.id,project_role=ProjectRole.MEMBER),Membership(project_id=self.project.id,user_id=self.viewer.id,project_role=ProjectRole.VIEWER)])
+            self.task=Task(project_id=self.project.id,title="Concurrent task",description="",status=TaskStatus.TODO,created_by=self.manager.id,assignee_id=self.member.id); s.add(self.task); s.commit()
+            self.task_id=self.task.id
+        self.client=TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        with self.TestSession() as s:
+            s.query(Task).delete(); s.query(Membership).delete(); s.query(Project).delete(); s.query(User).delete(); s.commit()
+
+    def headers(self,email,password):
+        r=self.client.post("/api/auth/login",json={"email":email,"password":password})
+        self.assertEqual(r.status_code,200,r.text)
+        return {"Authorization":f"Bearer {r.json()['access_token']}"}
+
+    def test_invalid_login_and_anonymous_access_are_rejected(self):
+        self.assertEqual(self.client.post("/api/auth/login",json={"email":"manager@test.local","password":"wrong-password"}).status_code,401)
+        self.assertEqual(self.client.get(f"/api/tasks/{self.task_id}").status_code,401)
+
+    def test_viewer_cannot_change_task(self):
+        headers=self.headers("viewer@test.local","Viewer123!")
+        r=self.client.patch(f"/api/tasks/{self.task_id}",headers=headers,json={"version":1,"status":"DONE"})
+        self.assertEqual(r.status_code,403)
+
+    def test_stale_task_version_returns_latest_task_with_conflict(self):
+        headers=self.headers("manager@test.local","Manager123!")
+        url=f"/api/tasks/{self.task_id}"
+        first=self.client.patch(url,headers=headers,json={"version":1,"status":"IN_PROGRESS"})
+        self.assertEqual(first.status_code,200,first.text)
+        self.assertEqual(first.json()["version"],2)
+        stale=self.client.patch(url,headers=headers,json={"version":1,"status":"DONE"})
+        self.assertEqual(stale.status_code,409)
+        self.assertEqual(stale.json()["detail"]["latest"]["status"],"IN_PROGRESS")
+        self.assertEqual(stale.json()["detail"]["latest"]["version"],2)
+
+if __name__=="__main__": unittest.main()
